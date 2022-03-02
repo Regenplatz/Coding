@@ -1,0 +1,443 @@
+---
+title: "US Aircraft Registration by FAA"
+author: "DataBauHeini, WhyKiki"
+date: "September 18, 2021"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE)
+knitr::opts_knit$set(root.dir="../Data")
+```
+
+
+```{r prerequisites, include=FALSE}
+library(tidyverse)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(sqldf)
+library(usmap)
+library(rmarkdown)
+library(tinytex)
+library(NCmisc)
+library(kableExtra)
+library(knitr)
+```
+<br>
+
+## General Infos
+### Abbreviations
+Variable names were designed without dots to avoid conflicts within SQL statement(s).
+Following abbreviations were used as part of column names:
+
+*ACFT*: Aircraft, *df_*: Dataframe, *HP*: Horsepower, *MFR*: Manufacturer, *No.*: Number, *v_*: Vector 
+<br>
+
+
+### Files
+This project covers various topics which were split to different scripts: 
+
+Topic                                Script
+------------------------------------ --------------------------
+data preparation and preprocessing   [AircraftRegistration_data.R](AircraftRegistration_data.R)
+visualization and linear regression  [AircraftRegistration_plots.R](AircraftRegistration_plots.R)
+shiny app (word clouds, tables)      [app.R](app.R)
+
+<br>
+
+
+
+## About the Project
+The main goal of this project was to improve our beginner's capabilities in R. Therefore, we analyzed US aircraft registrations by Federal Aviation Admission. A specific goal was to analyze type and owner per aircraft registration and present our descoveries to the audience.            
+**Or do you have an idea how many aircrafts with what kind of specifications are registred in the land of the free?**
+<br>
+<br>
+
+
+## Data 
+
+### Data Source
+Data was downloaded as zip file from the *Federal Aviation Administration* (FAA) [website](https://www.faa.gov/licenses_certificates/aircraft_certification/aircraft_registry/releasable_aircraft_download/ "Federal Aviation Administration") in August 2021. The zip file contained several text files that together could be used to build up a database.
+For this project, only the following files were used: 
+
+  * master data (*MASTER.txt*)                       
+  * aircraft registration data (*ACFTREF.txt*)                     
+  * engine data (*ENGINE.txt*)  
+The whole dataset contains about 288 thousend entries. So at the time the set was created (27th of August 2021), there were that many aircrafts registred in the US. And those are all 'civil' ACFTs, because a list of the US Army-equipment is understandably not publicy available.
+<br>	
+	
+### Data Preprocessing
+Selected columns from those files were read into R using different functions (`read.csv()`, `read.table()`, `read.delim()`):
+```{r read data}
+## read master dataset about aircraft (first 1000 rows): Approach 1 (read.csv())
+master_selection <- c("MFR.MDL.CODE", "ENG.MFR.MDL", "YEAR.MFR", "TYPE.REGISTRANT", 
+                      "NAME", "CITY", "STATE", "CERTIFICATION", "EXPIRATION.DATE",
+                      "ZIP.CODE", "COUNTRY", "TYPE.AIRCRAFT", "TYPE.ENGINE",
+                      "LAST.ACTION.DATE")
+df_master <- read.csv("MASTER.txt")[, master_selection]
+
+## read dataset about aircraft engines: Approach 2 (read.table())
+engine_selection <- c("CODE", "MFR", "MODEL", "TYPE", "HORSEPOWER", "THRUST")
+df_engine <- read.table("ENGINE.txt", sep=",", header=TRUE)[, engine_selection]
+
+## read dataset about aircraft registration: Approach 3 (read.delim())
+registration_selection <- c("CODE", "MFR", "MODEL", "TYPE.ACFT",
+                            "NO.ENG", "NO.SEATS", "SPEED")
+df_registration <- read.delim("ACFTREF.txt", sep=",", header=TRUE)[, registration_selection]
+```
+
+Those dataframes were left-joined using different functions (`merge()`, `left_join()`):
+```{r join to single dataframe}
+## left join df_master and df_registration: Approach 1 (using merge function)
+df_aircraft <- merge(df_master, df_registration, by.x="MFR.MDL.CODE", by.y="CODE", all.x=TRUE)
+
+## left join newly created df_aircraft and df_engine: Approach 2 (using left_join function)
+df_aircraft <- left_join(df_aircraft, df_engine, by=c("ENG.MFR.MDL"="CODE")) 
+
+# remove unnecessary data frames
+rm(list = c("df_engine", "df_master", "df_registration"))
+```
+
+Date columns were converted from type integer to date type:
+```{r convert date columns}
+## set date columns from int to date type
+dateCols <- c("LAST.ACTION.DATE","EXPIRATION.DATE")
+for (some_date in dateCols) {
+  df_aircraft[[some_date]] <- as.Date(paste(df_aircraft[[some_date]]), format="%Y%m%d")
+}
+```
+
+Rename columns for better differentiation:
+```{r rename columns}
+## Rename columns: Approach 1 (without function)
+names(df_aircraft)[names(df_aircraft) == "MFR.x"] <- "MFR_ACFT"
+
+## Rename columns: Approach 2 (using a function)
+renameCols <- function(df, oldName, newName){
+  names(df)[names(df) == oldName] <- newName
+  return (df)
+}
+df_aircraft <- renameCols(df_aircraft, "MFR.y", "MFR_engine")
+df_aircraft <- renameCols(df_aircraft, "MODEL.x", "MODEL_ACFT")
+df_aircraft <- renameCols(df_aircraft, "MODEL.y", "MODEL_engine")
+```
+
+Change data type of registrants (from numeric to character):
+```{r change class}
+## change class of variables where necessary
+df_aircraft$TYPE.REGISTRANT <- as.character(df_aircraft$TYPE.REGISTRANT)
+
+## check if it is the right class
+class(df_aircraft$TYPE.REGISTRANT)
+```
+
+Create vectors for decoding categorical features:
+```{r create vectors for categorical features}
+v_type_Registrant <- c("Individual", "Partnership", "Corporation", "Co-Owned", "Government",
+                       "LLC", "Non Citizen Corporation", "Non Citizen Co-Owned")
+
+v_Certification <- c("Standart", "Limited", "Restricted", "Experimental", "Provisional",
+                     "Multiple", "Primary", "Special Flight Permit", "Light Sport")
+
+v_type_ACFT <- c("Glider", "Balloon", "Blimp/Dirigible", "Fixed wing single engine",
+                 "Fixed wing multi engine", "Rotorcraft", "Weight-shift-control",
+                 "Powered Parachute", "Gyroplane", "Hybrid Lift", "Other")
+
+v_type_engine <- c("None", "Reciprocating", "Turbo-prop", "Turbo-shaft", "Turbo-jet",
+                   "Turbo-fan", "Ramjet", "2 Cycle", "4 Cycle", "Unknown",
+                   "Electric", "Rotary")
+```
+<br>
+<br>
+
+### Tables
+```{r table calculations, message=FALSE, results="asis"}
+## variable for the "top ten"
+nTop <- 10
+
+## Aircraft Manufacturer
+df_ACFT_TopList_MFR <- df_aircraft %>%
+  group_by(MFR_ACFT) %>%
+  filter(!is.na(MFR_ACFT)) %>%
+  summarise(count_n=n()) %>%
+  slice_max(count_n, n=nTop, with_ties=FALSE)
+
+df_ACFT_TopList_MFR %>%
+  kbl(caption="TOP TEN AIRCFRAFT MANUFACTURERS") %>%
+  kable_styling()
+```
+The most popular producers of aircrafts in the US were found to be *Cessna*, *Piper* and *Beech*.
+These are manufacturer of rather small aircrafts with only a few seats. Later, this statement will be confirmed by another visualisation.
+
+There is also a [shiny-app](app.R), where three different word clouds represent the most frequent *cities*, *aircraft manufacturers* and *aircraft models*.
+In the file [AircraftRegistration_data.R](AircraftRegistration_data.R) you will find additional top lists (aircraft model, engine manufacturer & series, owners).
+<br>
+<br>
+
+#### Pivot table
+Possible approaches to create a pivot table are shown below. We did not implement a pivot table in the shiny app because of performance issues. Nevertheless, the pivot approach might be helpful for various data analysis investigations.
+```{r pivot table ..., results='hide'}
+## lower code incl. outcommended lines makes a pivot table with dyplr package
+df_pivot1 <- df_aircraft %>%
+  select(STATE, MFR_ACFT, MODEL_ACFT, TYPE.ACFT) # %>%
+# group_by(STATE, MFR_ACFT, MODEL_ACFT, ) %>%
+# summarize(count_model = n())
+
+df_pivot <- pivot_longer(df_pivot1, 
+                         cols = c("STATE"),
+                         names_to = "category", 
+                         values_to = "state")
+head(df_pivot, n=10)
+```
+<br>
+<br>
+
+### Plots
+The dataset was explored visually first. The most convinient way was to use simple scatter plots.
+```{r plot counts}
+df_yr_filt <- filter(df_aircraft, YEAR.MFR > 1900 & !is.na(YEAR.MFR)) 
+
+par(mfrow=c(1,3))
+## plot no. of engines over MFR-Year, incl. filter all NAs and wrong inputs (<4 digits)
+plot(x = df_yr_filt$YEAR.MFR, y = df_yr_filt$NO.ENG, pch = 16,
+     main = "No. of engines per MFR-Year", xlab = "MFR-Year", ylab = "No. of engines")
+
+## plot no. of seats per MFR-year
+plot(x = df_yr_filt$YEAR.MFR, y = df_yr_filt$NO.SEATS, pch = 16,
+     main = "No. of seats per MFR-Year", xlab = "MFR-Year", ylab = "No. of seats")
+
+## plot expiring certificates
+plot(df_aircraft$EXPIRATION.DATE,
+     main = "Expiration dates of certificates", xlab = "Entry No.", ylab = "exp. date")
+```
+
+The plot on the left strengthens the assumption, that most planes are small ones with one engine (= low number of seats).
+Most of the aircrafts with more than 8 engines are experimental ones. This can be simply approved by sorting the original dataframe by number of engines in descending order.
+<br>
+Another interesting view on the dataset is, that the number of seats rise exponentially the newer the aircrafts are.
+<br>
+The plot on the right shows something related to a clean database. There are a few entries, which are expired and some already for a long time. How is this possible in such a highly secure sector as aviation?
+<br>
+
+#### Use-case for optimisation
+Depending on how the FAA operates, optimisation could be used on the expiring certificates:
+
+1) If they inform the certificate owner with manual processes (look for expiring cert., create and send an information letter), they could plan the work load of the administrative employee.
+
+2) Another approach is to model the expecting registrations (out of the behavior of the registrants until now) and from this to optimise future workload including planning of the staff.
+<br>
+<br>
+
+```{r different plots, echo = FALSE, message = FALSE, results = 'asis'}
+## for the next 3 plots, MFR-Year is grouped to 5 years,
+## incl. filter all NAs and wrong inputs (<4 digits)
+df_aircraft_MFR5Years <- df_aircraft %>%
+  filter(YEAR.MFR > 1900 & !is.na(YEAR.MFR)) %>%
+  group_by(as.integer(YEAR.MFR/5)*5)
+
+## renames the last column
+names(df_aircraft_MFR5Years)[ncol(df_aircraft_MFR5Years)] <- "YEAR.MFR5"
+
+## group the distribution of No. of ACFT over 5year-periods
+df_ACFT_No_MFRYear <- df_aircraft_MFR5Years %>%
+  group_by(YEAR.MFR5) %>%
+  summarise(count_ac = n())
+
+## overview aircraft-certification per 5 years
+## pick the first character of Certification, bind the columns and rename it
+v_ACFT_cert_cleanded <- substring(df_aircraft_MFR5Years$CERTIFICATION, first = 1, last = 1)
+df_aircraft_MFR5Years <- cbind(df_aircraft_MFR5Years, v_ACFT_cert_cleanded)
+df_aircraft_MFR5Years <- renameCols(df_aircraft_MFR5Years, "...27", "ACFT Cert. cleaned")
+rm(v_ACFT_cert_cleanded)
+
+## create a new dataframe with ""-certification filtered
+df_ACFT_cert_5years <- df_aircraft_MFR5Years %>%
+  filter(`ACFT Cert. cleaned`>=1) %>%
+  group_by(`ACFT Cert. cleaned`, YEAR.MFR5) %>%
+  summarise(count_ac = n())
+
+## which type of certification for a certain MRF-period
+ggplot(df_ACFT_cert_5years, aes(x=YEAR.MFR5, y=count_ac)) +
+  geom_bar(stat = "identity", aes(fill=`ACFT Cert. cleaned`)) +
+  xlab("MFR year-period") +
+  ylab("No. of ACFT-Certifications") +
+  ggtitle("ACFT-Certifications per 5 MFR-years period") +
+  scale_fill_discrete(name = "Certification Type",
+                      labels = v_Certification)
+
+```
+
+Most registred aircrafts were produced between 1970 and 1975. There is a remarkable drop in the number of aircrafts from 1980 to 1990. The reason for this needs to be further studied. There are also a lot of old experimental planes registered.
+<br>
+This might be caused by the fact that it is harder to find certificated spare parts especially for oldtimers. Consequently, those were repaired with replicated parts and the experimental status preserves the airworthiness.
+
+```{r different plots2, echo = FALSE, message = FALSE, results = 'asis'}
+## overview owner-type per 5 years, only for the US-Residentials
+## first, its important the type of the column 'Type.Registrant' has changed to character,
+## otherwise the function grepl doesn't work -> already done at prepreparation
+df_owner_ACFT <- df_aircraft_MFR5Years %>%
+  filter(COUNTRY == "US", !is.na(TYPE.REGISTRANT)) %>%
+  group_by(YEAR.MFR5, TYPE.REGISTRANT) %>%
+  summarise(count_ac = n())
+
+ggplot(df_owner_ACFT, aes(x=YEAR.MFR5, y=count_ac)) + 
+  geom_bar(stat="identity", aes(fill=TYPE.REGISTRANT)) +
+  xlab("MFR year-period")  +
+  ylab("No. of ACFT") +
+  ggtitle("Distribution of owner-types per 5 MFR-years period") +
+  scale_fill_discrete(name = "Type Registrant",
+                      labels = v_type_Registrant) +
+  theme(axis.text = element_text(size = 5))
+
+## excludes registrants outside of the US, count aircrafts and group by type of ACFT for each state
+df_ACFTNo_State <- df_aircraft %>%
+  filter(COUNTRY == "US") %>%
+  group_by(STATE, TYPE.ACFT) %>%
+  summarise(count_ac = n())
+
+```
+
+The mentioned drop in the number of aircrafts from 1980 to '90 is also visible in the number of individual registrants (and others).
+Maybe those aircrafts are not so interesting for private owners (low HP, unreliable, value-unstable).
+
+```{r different plots3, message = FALSE, results = 'asis'}
+## an example code of plotting barcharts
+ggplot(df_ACFTNo_State, aes(x=STATE, y=count_ac)) + 
+  geom_bar(stat="identity", aes(fill=TYPE.ACFT)) +
+  xlab("State")  +
+  ylab("No. of ACFT registered") +
+  ggtitle("No. of Aircrafts registered in each state") +
+  scale_fill_discrete(name = "Type Aircraft",
+                      labels = v_type_ACFT) +
+  theme(axis.text = element_text(size = 4.1))
+```
+
+There are three states where a lot of aircrafts are registred: California, Florida and Texas. Besides *Rotorcraft* there are also much more aircrafts of the type 'fixed wing multi engine' registred. One reason could be that there are the most known rocket launch sides (e.g. Cape Canaveral FL, Vandenberg Space Force Base CA). From this point of view it might be concluded that there are big research companies which also research on other aviatic equipment besides rockets.
+<br>
+But in those three states there are also a lot of 'fixed wing single engine' aircrafts registred. It could also be an indicator for wealthy population.
+
+On the next plot we will have a closer look on experimental planes:
+```{r different plots4, echo = FALSE, message = FALSE}
+df_exp_ACFT <- df_aircraft %>%
+  filter(grepl("^4", CERTIFICATION), COUNTRY == "US", !is.na(TYPE.REGISTRANT)) %>%
+  group_by(STATE, TYPE.REGISTRANT) %>%
+  summarise(count_ac = n())
+
+ggplot(df_exp_ACFT, aes(x=STATE, y=count_ac)) + 
+  geom_bar(stat="identity", aes(fill=TYPE.REGISTRANT)) +
+  xlab("State")  +
+  ylab("No. of exp. ACFT") +
+  ggtitle("Distribution of experimental aircrafts per states & owner") +
+  scale_fill_discrete(name = "Type Registrant",
+                      labels = v_type_Registrant) +
+  theme(axis.text = element_text(size = 4.1))
+```
+
+This plot shows different interesting insights: 
+On the first view the distribution of experimental aircrafts looks the same like the general distribution.
+Second, in the three states there are clear more exp. aircrafts owned by corporations and or by co-owner.
+Another interesting point: in Delaware (DE) the most planes are registred on corporations and LLC. Delaware is also known as tax paradise, so could this be a reason?
+Checking the table of top10-owners of registred aircrafts (excl. Airlines), the first seven top owners are trustees. 
+<br>
+<br>
+
+### Boxplots
+In this chapter we visualized data using boxplots.
+First a exemplary code how boxplots are generated. Now the manufacter-years were grouped to decades for better investigation.
+```{r boxplots, echo = FALSE, message = FALSE, warning = FALSE}
+## for the next plots, MFR-Year is grouped to 10 years,
+## incl. filter all NAs and wrong inputs (<4 digits)
+
+df_aircraft_MFR10Years <- df_aircraft %>%
+  filter(YEAR.MFR > 1900 & !is.na(YEAR.MFR)) %>%
+  group_by(as.integer(YEAR.MFR/10)*10)
+
+## renames the last column
+names(df_aircraft_MFR10Years)[ncol(df_aircraft_MFR10Years)] <- "YEAR.MFR10"
+
+## change class of 10year-column to factor
+df_aircraft_MFR10Years$YEAR.MFR10 <- as.factor(df_aircraft_MFR10Years$YEAR.MFR10)
+
+## boxplot of thrust for each decade
+## we have to filter ACFT with MFR-Year before 1950, because there is such a small no of planes
+df_aircraft_MFR10Years_thrust <- df_aircraft_MFR10Years %>%
+  filter(YEAR.MFR >= 1950)
+```
+```{r message = FALSE, warning = FALSE}
+## removed the x-axis, colored the boxes
+ggplot(df_aircraft_MFR10Years_thrust, aes(x=YEAR.MFR10, y=THRUST, fill = YEAR.MFR10)) +
+  geom_boxplot() +
+  xlab("MFR decade") +
+  ylab("Thrust [lbf]") +
+  ggtitle("Boxplots of Thrust per decade") +
+  scale_y_log10() +
+  annotation_logticks(sides = c("l")) +
+  scale_fill_discrete(name = "Decade") +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+```
+
+The boxplot aboves showed us some statistical key-figures about the thrust of registred airplanes. There were only the decades from 1950 investigated, because of two reasons:
+
+1) Jet engines were not used before ~1945.
+2) Between 1945 and '50 there are such a small number of aircrafts with jet engines (even during 1950s) so there wouldn't be a useful insight.
+
+There is a general drop in thrust in the 1970s and '80s. We have seen before that during this periods there were less planes registered.  Like with cars there is the assumption, that the oil crisis during the 70s affected the performance of engines for aircrafts were reduced, too.
+<br>
+<br>
+The next boxplot shows the distribution of horsepower (generally for piston engines) over decade. There is no drop on the median of horsepower (HP) visible. But why is this contrary to the thrust or vehicles (not shown in this study)? This needs to be investigated in further studies.
+It's important to know that the y-scale is limited to 1000 horsepower. There is a significant number aircrafts with more horsepower, but showing them too will reduce the readability.
+
+```{r echo = FALSE, message = FALSE, warning = FALSE}
+## boxplot of HP for each decade (generally for piston engines)
+ggplot(df_aircraft_MFR10Years, aes(x=YEAR.MFR10, y=HORSEPOWER)) +
+  geom_boxplot() +
+  xlab("MFR 10 year-period") +
+  ylab("Horsepower") +
+  ggtitle("Boxplots of Horsepower per decade") +
+  scale_y_continuous(limits = c(0,1000))
+```
+```{r echo = FALSE, message = FALSE, warning = FALSE}
+## boxplot of no. of seats each decade, its necessary to have a logarithmic y-axis,
+## because most planes have a lower number of seats
+ggplot(df_aircraft_MFR10Years, aes(x=YEAR.MFR10, y=NO.SEATS)) +
+  geom_boxplot() +
+  scale_y_log10(breaks = c(1, 2, 5, 10, 100, 1000)) +
+  xlab("MFR 10 year-period") +
+  ylab("No. of seats (log)") +
+  ggtitle("Boxplots of ACFT-Seats with log. y-axis")
+```
+
+Until the 1950s, the mean number of seats were two (except in the '20s). From the 1950s the mean was found to be four seats. So most of the regsitred aircrafts were are small planes or rotorcrafts.
+The highest number of seats is about 660. Those are mostly to be found on *Boeing 747*, also known as *JumboJet*.
+<br>
+<br>
+
+#### View registrations per state in US map:
+On the map below you can also see the distribution of aircraft registrations in the US. Owners from foreign countries were excluded.
+```{r plot in US map, echo=FALSE}
+## US states
+us_states <- "'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL',
+              'IN','IA','KS', 'KY', 'LA','ME','MD','MA','MI','MN','MS','MO',
+              'MT','NE','NV','NH','NJ','NM','NY','NC','ND', 'OH','OK','OR',
+              'PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY'"
+
+df_cntPerState <- sqldf(paste("SELECT STATE as state, COUNT(*) as cnt
+                         FROM df_aircraft
+                         WHERE STATE in (",us_states,")
+                         GROUP BY STATE
+                        "))
+
+## plot in US map (the higher the count the deeper the color)
+plot_usmap(data=df_cntPerState, values="cnt", color="blue") +
+  scale_fill_continuous(
+    low="white", high="blue", name="count", label=scales::comma) + 
+  theme(legend.position="right")
+```
+
+### Conclusions
+This work gave some interesting insights into the *population* of aircrafts registered in the US. If this database was connected with others, lets say from company registrations or tax office, new regulations as well as better support of environmental protection are to be expected. Even connection to data from airplane crashes might improve flight security as this might be traced back to manufacturer or engine-specific defects. There is still a lot more to explore which needs to be postponed to future projects.
+
