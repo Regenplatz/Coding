@@ -1,6 +1,6 @@
 ---
 title: "US Aircraft Registration by FAA"
-author: "DataBauHeini, WhyKiki"
+author: "Simon, WhyKiki"
 date: "September 18, 2021"
 output: html_document
 ---

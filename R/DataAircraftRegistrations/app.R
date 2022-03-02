@@ -106,7 +106,7 @@ wc_page <- tabPanel(
 about_page <- tabPanel(
   title = "About",
   titlePanel("About this Project"),
-  "This app was created by DataBauHeini and WhyKiki to highlight interesting facts \r 
+  "This app was created by Simon and WhyKiki to highlight interesting facts \r 
   about the United States Aircraft Registration by the Federal Aircraft Association (FAA).",
   br(), br(),
   "The app was created with R Shiny.",
